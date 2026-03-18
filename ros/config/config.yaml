@@ -13,6 +13,21 @@ kiss_icp_node:
     # position_covariance: 0.1
     # orientation_covariance: 0.1
 
+    # Start processing immediately or wait for `/kiss_icp/start`
+    # running_startup: true
+
+    # Fallback starting pose used by `/kiss_icp/reset` if `/current_pose` hasn't published yet.
+    # initial_pose:
+    #   position:
+    #     x: 0.0
+    #     y: 0.0
+    #     z: 0.0
+    #   orientation:
+    #     x: 0.0
+    #     y: 0.0
+    #     z: 0.0
+    #     w: 1.0
+
     ####    Core KISS-ICP parameters    ####
 
     data:

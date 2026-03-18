@@ -46,6 +46,10 @@ The ROS-related parameters can be set via command-line when launching the node:
 * `invert_odom_tf`
 * `position_covariance`
 * `orientation_covariance`
+* `current_pose_topic`
+* `running_startup`
+* `initial_pose.position.{x,y,z}`
+* `initial_pose.orientation.{x,y,z,w}`
 
 You can set them like so:
 ```sh
@@ -56,6 +60,32 @@ For example:
 ros2 launch kiss_icp odometry.launch.py topic:=/lidar/points base_frame:=lidar_cloud
 ```
 Note that if you set the ROS-related parameters in the yaml configuration file and via command-line, the values in the yaml file will be selected in the end.
+
+### Runtime Control (Start/Stop/Reset)
+
+By default, the node starts processing incoming pointcloud frames immediately.
+You can pause/resume processing and reset the internal state (local map + adaptive threshold + pose initialization) using these services:
+
+- `/kiss_icp/start` (`std_srvs/srv/Trigger`): resume processing frames
+- `/kiss_icp/stop` (`std_srvs/srv/Trigger`): pause processing frames and reset internal state
+- `/kiss_icp/reset` (`std_srvs/srv/Trigger`): reset internal state and set the initial pose
+
+The legacy service `/kiss/reset` is still available and behaves like `/kiss_icp/reset`.
+
+#### Initial pose source
+
+On `/kiss_icp/reset` (and also `/kiss_icp/stop`), the node sets the internal starting pose using:
+
+1. The latest message received on `current_pose_topic` (type: `geometry_msgs/msg/PoseWithCovarianceStamped`)
+2. If no message was received yet, it falls back to the parameters:
+   - `initial_pose.position.{x,y,z}`
+   - `initial_pose.orientation.{x,y,z,w}`
+
+`current_pose_topic` defaults to `/current_pose`, and can be set from the launch file via:
+
+```sh
+ros2 launch kiss_icp odometry.launch.py ... current_pose_topic:=/my_pose_topic
+```
 
 ## Out of source builds
 

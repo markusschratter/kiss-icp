@@ -31,10 +31,15 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/header.hpp>
 #include <std_srvs/srv/empty.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <string>
 #include <tf2_ros/buffer.hpp>
 #include <tf2_ros/transform_broadcaster.hpp>
 #include <tf2_ros/transform_listener.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+
+#include <atomic>
+#include <mutex>
 
 namespace kiss_icp_ros {
 
@@ -61,6 +66,17 @@ private:
                        const std_msgs::msg::Header &header);
     void ResetService(const std::shared_ptr<std_srvs::srv::Empty::Request> request,
                       std::shared_ptr<std_srvs::srv::Empty::Response> response);
+    void CurrentPoseCallback(const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr &msg);
+
+    void StartService(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                       std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    void StopService(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                      std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    void ResetTriggerService(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                              std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+
+    /// Shared implementation for both `/kiss_icp/reset` and the legacy `kiss/reset` service.
+    void DoReset();
 
 private:
     /// Tools for broadcasting TFs.
@@ -73,6 +89,7 @@ private:
 
     /// Data subscribers.
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr current_pose_sub_;
 
     /// Data publishers.
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_;
@@ -82,6 +99,9 @@ private:
 
     /// Service servers.
     rclcpp::Service<std_srvs::srv::Empty>::SharedPtr reset_service_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_service_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stop_service_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_trigger_service_;
 
     /// KISS-ICP
     std::unique_ptr<kiss_icp::pipeline::KissICP> kiss_icp_;
@@ -90,9 +110,27 @@ private:
     std::string lidar_odom_frame_{"odom_lidar"};
     std::string base_frame_{};
 
+    /// Source topic providing the initial pose for `/kiss_icp/reset`.
+    std::string current_pose_topic_{"/current_pose"};
+
     /// Covariance diagonal
     double position_covariance_;
     double orientation_covariance_;
+
+    /// Start/stop control for incoming pointcloud processing.
+    bool running_startup_{true};
+    std::atomic<bool> running_{true};
+
+    /// Latest pose cache from `/current_pose`.
+    std::mutex current_pose_mutex_;
+    bool has_current_pose_{false};
+    Sophus::SE3d current_pose_{};
+
+    /// Fallback initial pose used when `/current_pose` hasn't published yet.
+    Sophus::SE3d fallback_initial_pose_{};
+
+    /// Guards access to the underlying KISS-ICP pipeline state (`kiss_icp_`).
+    std::mutex kiss_icp_mutex_;
 };
 
 }  // namespace kiss_icp_ros

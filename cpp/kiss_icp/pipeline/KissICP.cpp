@@ -85,4 +85,10 @@ void KissICP::Reset() {
         AdaptiveThreshold(config_.initial_threshold, config_.min_motion_th, config_.max_range);
 }
 
+void KissICP::SetInitialPose(const Sophus::SE3d &pose) {
+    // Only adjust the state used for the next frame's `initial_guess`.
+    last_pose_ = pose;
+    last_delta_ = Sophus::SE3d();
+}
+
 }  // namespace kiss_icp::pipeline

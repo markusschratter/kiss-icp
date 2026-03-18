@@ -21,6 +21,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 #include <memory>
 #include <sophus/se3.hpp>
 #include <utility>
@@ -45,6 +46,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/empty.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/static_transform_broadcaster.hpp>
 #include <tf2_ros/transform_broadcaster.hpp>
 
@@ -81,11 +83,16 @@ OdometryServer::OdometryServer(const rclcpp::NodeOptions &options)
 
     // Construct the main KISS-ICP odometry node
     kiss_icp_ = std::make_unique<kiss_icp::pipeline::KissICP>(config);
+    running_.store(running_startup_);
 
     // Initialize subscribers
     pointcloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
         "pointcloud_topic", rclcpp::SensorDataQoS(),
         std::bind(&OdometryServer::RegisterFrame, this, std::placeholders::_1));
+
+    current_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+        current_pose_topic_, rclcpp::SystemDefaultsQoS(),
+        std::bind(&OdometryServer::CurrentPoseCallback, this, std::placeholders::_1));
 
     // Initialize publishers
     rclcpp::QoS qos((rclcpp::SystemDefaultsQoS().keep_last(1).durability_volatile()));
@@ -105,6 +112,17 @@ OdometryServer::OdometryServer(const rclcpp::NodeOptions &options)
     reset_service_ = create_service<std_srvs::srv::Empty>(
         "kiss/reset", std::bind(&OdometryServer::ResetService, this, std::placeholders::_1,
                                 std::placeholders::_2));
+
+    start_service_ = create_service<std_srvs::srv::Trigger>(
+        "/kiss_icp/start",
+        std::bind(&OdometryServer::StartService, this, std::placeholders::_1, std::placeholders::_2));
+    stop_service_ = create_service<std_srvs::srv::Trigger>(
+        "/kiss_icp/stop",
+        std::bind(&OdometryServer::StopService, this, std::placeholders::_1, std::placeholders::_2));
+    reset_trigger_service_ = create_service<std_srvs::srv::Trigger>(
+        "/kiss_icp/reset",
+        std::bind(&OdometryServer::ResetTriggerService, this, std::placeholders::_1,
+                  std::placeholders::_2));
 
     RCLCPP_INFO(this->get_logger(), "KISS-ICP ROS 2 odometry node initialized");
 }
@@ -126,6 +144,26 @@ void OdometryServer::initializeParameters(kiss_icp::pipeline::KISSConfig &config
     RCLCPP_INFO(this->get_logger(), "\tPosition covariance: %.2f", position_covariance_);
     orientation_covariance_ = declare_parameter<double>("orientation_covariance", 0.1);
     RCLCPP_INFO(this->get_logger(), "\tOrientation covariance: %.2f", orientation_covariance_);
+
+    current_pose_topic_ = declare_parameter<std::string>("current_pose_topic", current_pose_topic_);
+    RCLCPP_INFO(this->get_logger(), "\tCurrent pose topic: %s", current_pose_topic_.c_str());
+
+    running_startup_ = declare_parameter<bool>("running_startup", running_startup_);
+    RCLCPP_INFO(this->get_logger(), "\tRunning on startup: %d", running_startup_);
+
+    // Fallback starting pose used by `/kiss_icp/reset` if we haven't received `/current_pose` yet.
+    const double px = declare_parameter<double>("initial_pose.position.x", 0.0);
+    const double py = declare_parameter<double>("initial_pose.position.y", 0.0);
+    const double pz = declare_parameter<double>("initial_pose.position.z", 0.0);
+    const double qx = declare_parameter<double>("initial_pose.orientation.x", 0.0);
+    const double qy = declare_parameter<double>("initial_pose.orientation.y", 0.0);
+    const double qz = declare_parameter<double>("initial_pose.orientation.z", 0.0);
+    const double qw = declare_parameter<double>("initial_pose.orientation.w", 1.0);
+
+    Eigen::Vector3d t(px, py, pz);
+    Eigen::Quaterniond q(qw, qx, qy, qz);  // Eigen uses (w, x, y, z)
+    q.normalize();
+    fallback_initial_pose_ = Sophus::SE3d(q, t);
 
     config.max_range = declare_parameter<double>("data.max_range", config.max_range);
     RCLCPP_INFO(this->get_logger(), "\tMax range: %.2f", config.max_range);
@@ -161,11 +199,14 @@ void OdometryServer::initializeParameters(kiss_icp::pipeline::KISSConfig &config
 }
 
 void OdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg) {
-    const auto cloud_frame_id = msg->header.frame_id;
+    if (!running_.load()) return;
+
     const auto points = PointCloud2ToEigen(msg);
     const auto timestamps = GetTimestamps(msg);
 
     // Register frame, main entry point to KISS-ICP pipeline
+    std::lock_guard<std::mutex> lock(kiss_icp_mutex_);
+    if (!running_.load()) return;  // Stop/Reset might have been called while we were converting input
     const auto &[frame, keypoints] = kiss_icp_->RegisterFrame(points, timestamps);
 
     // Extract the last KISS-ICP pose, ego-centric to the LiDAR
@@ -234,15 +275,80 @@ void OdometryServer::PublishClouds(const std::vector<Eigen::Vector3d> &frame,
     local_map_header.frame_id = lidar_odom_frame_;
     map_publisher_->publish(std::move(EigenToPointCloud2(kiss_map, local_map_header)));
 }
+
+void OdometryServer::CurrentPoseCallback(
+    const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr &msg) {
+    const auto &pose = msg->pose.pose;
+    Eigen::Vector3d t(pose.position.x, pose.position.y, pose.position.z);
+    Eigen::Quaterniond q(pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z);
+    if (q.norm() == 0.0) return;
+    q.normalize();
+
+    Sophus::SE3d pose_se3(q, t);
+
+    std::lock_guard<std::mutex> lock(current_pose_mutex_);
+    current_pose_ = pose_se3;
+    has_current_pose_ = true;
+}
+
+void OdometryServer::DoReset() {
+    // Assumes the caller holds `kiss_icp_mutex_`.
+    kiss_icp_->Reset();
+
+    Sophus::SE3d initial_pose;
+    bool used_current_pose = false;
+    {
+        std::lock_guard<std::mutex> lock(current_pose_mutex_);
+        used_current_pose = has_current_pose_;
+        initial_pose = used_current_pose ? current_pose_ : fallback_initial_pose_;
+    }
+
+    kiss_icp_->SetInitialPose(initial_pose);
+    if (used_current_pose) {
+        RCLCPP_INFO(this->get_logger(), "KISS-ICP reset: initial pose loaded from /current_pose");
+    } else {
+        RCLCPP_INFO(this->get_logger(), "KISS-ICP reset: initial pose loaded from parameters");
+    }
+}
+
+void OdometryServer::StartService(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+    (void)request;
+    running_.store(true);
+    response->success = true;
+    response->message = "KISS-ICP started";
+}
+
+void OdometryServer::StopService(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+    (void)request;
+    running_.store(false);
+    std::lock_guard<std::mutex> lock(kiss_icp_mutex_);
+    DoReset();
+    response->success = true;
+    response->message = "KISS-ICP stopped (processing paused)";
+}
+
+void OdometryServer::ResetTriggerService(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+    (void)request;
+    std::lock_guard<std::mutex> lock(kiss_icp_mutex_);
+    DoReset();
+    response->success = true;
+    response->message = "KISS-ICP reset completed";
+}
+
 void OdometryServer::ResetService(
     [[maybe_unused]] const std::shared_ptr<std_srvs::srv::Empty::Request> request,
     [[maybe_unused]] std::shared_ptr<std_srvs::srv::Empty::Response> response) {
-    RCLCPP_INFO(this->get_logger(), "Resetting KISS-ICP map and odometry");
-
-    // Reset the KISS-ICP pipeline
-    kiss_icp_->Reset();
-
-    RCLCPP_INFO(this->get_logger(), "KISS-ICP reset completed successfully");
+    (void)request;
+    (void)response;
+    std::lock_guard<std::mutex> lock(kiss_icp_mutex_);
+    RCLCPP_INFO(this->get_logger(), "Resetting KISS-ICP map and odometry (legacy service)");
+    DoReset();
 }
 }  // namespace kiss_icp_ros
 

@@ -57,6 +57,9 @@ def generate_launch_description():
     publish_odom_tf = LaunchConfiguration("publish_odom_tf", default=True)
     invert_odom_tf = LaunchConfiguration("invert_odom_tf", default=True)
 
+    # Initial pose source for `/kiss_icp/reset`
+    current_pose_topic = LaunchConfiguration("current_pose_topic", default="/localization/pose_estimator/pose_with_covariance")
+
     position_covariance = LaunchConfiguration("position_covariance", default=0.1)
     orientation_covariance = LaunchConfiguration("orientation_covariance", default=0.1)
 
@@ -78,6 +81,7 @@ def generate_launch_description():
                 "lidar_odom_frame": lidar_odom_frame,
                 "publish_odom_tf": publish_odom_tf,
                 "invert_odom_tf": invert_odom_tf,
+                "current_pose_topic": current_pose_topic,
                 # ROS CLI arguments
                 "publish_debug_clouds": visualize,
                 "use_sim_time": use_sim_time,

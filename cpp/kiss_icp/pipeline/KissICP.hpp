@@ -83,6 +83,10 @@ public:
     const Sophus::SE3d &delta() const { return last_delta_; }
     Sophus::SE3d &delta() { return last_delta_; }
     void Reset();
+    /// Sets the initial pose used as the `initial_guess` for the next frame registration.
+    ///
+    /// This does not modify the local map or adaptive threshold; those are handled by `Reset()`.
+    void SetInitialPose(const Sophus::SE3d &pose);
 
 private:
     Sophus::SE3d last_pose_;
