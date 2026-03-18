@@ -35,6 +35,13 @@ A preconfigured Rviz2 window is launched by default. To disable it, you can set 
 ros2 launch kiss_icp odometry.launch.py topic:=<topic_name> visualize:=false
 ```
 
+### Published topics
+
+The node publishes the estimated motion in addition to TF (if enabled):
+
+- `kiss/odometry` (`nav_msgs/msg/Odometry`): twist + pose; `child_frame_id` is the moving frame (LiDAR or `base_frame` when set).
+- `kiss/pose_with_covariance` (`geometry_msgs/msg/PoseWithCovarianceStamped`): same pose and 6×6 pose covariance as the odometry message (`header.frame_id` is `lidar_odom_frame`).
+
 ### Configuration
 
 The parameters for the KISS-ICP algorithm itself are written in a yaml configuration file. They are meant to be set before launching the node. An **example** yaml file is given in config/config.yaml. The file parsed by default is located in the share directory of the kiss_icp package (in your workspace that would be `install/kiss_icp/share/kiss_icp/config/config.yaml`), but any file path can be provided with the `config_file` launch argument, e.g.: `ros2 launch kiss_icp odometry.launch.py config_file:=/path/to/my/config_file.yaml`.
